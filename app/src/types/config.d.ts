@@ -268,7 +268,7 @@ declare namespace Config {
      * User interface language
      * Same as {@link IAppearance.lang}
      */
-    export type TLang = "en_US" | "es_ES" | "fr_FR" | "zh_CHT" | "zh_CN" | "ja_JP";
+    export type TLang = "en_US" | "es_ES" | "fr_FR" | "zh_CHT" | "zh_CN" | "ja_JP" | "it_IT" | "de_DE" | "he_IL" | "ru_RU" | "pl_PL";
 
     /**
      * SiYuan bazaar related configuration
@@ -289,6 +289,14 @@ declare namespace Config {
      */
     interface IMarkdown {
         /**
+         * Whether to enable the inline asterisk
+         */
+        inlineAsterisk: boolean;
+        /**
+         * Whether to enable the inline underscore
+         */
+        inlineUnderscore: boolean;
+        /**
          * Whether to enable the inline superscript
          */
         inlineSup: boolean;
@@ -304,6 +312,10 @@ declare namespace Config {
          * Whether to enable the inline math
          */
         inlineMath: boolean;
+        /**
+         * Whether to enable the inline strikethrough
+         */
+        inlineStrikethrough: boolean;
     }
 
     /**
@@ -329,6 +341,10 @@ declare namespace Config {
          * The default number of backlinks to mention
          */
         backmentionExpandCount: number;
+        /**
+         * Whether the backlink contains children
+         */
+        backlinkContainChildren: boolean;
         /**
          * The maximum length of the dynamic anchor text for block references
          */
@@ -1373,6 +1389,10 @@ declare namespace Config {
          * Timeout (unit: seconds)
          */
         timeout: number;
+        /**
+         * Concurrent requests.
+         */
+        concurrentReqs: number;
     }
 
     /**
@@ -1395,6 +1415,10 @@ declare namespace Config {
          * Timeout (unit: seconds)
          */
         timeout: number;
+        /**
+         * Concurrent requests.
+         */
+        concurrentReqs: number;
         /**
          * Username
          */
@@ -1758,6 +1782,10 @@ declare namespace Config {
          * Tab title
          */
         title?: string;
+        /**
+         * Tab recent view time
+         */
+        activeTime?: string;
     }
 
     /**

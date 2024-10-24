@@ -29,6 +29,7 @@ import (
 	"github.com/88250/lute/parse"
 	"github.com/siyuan-note/logging"
 	"github.com/siyuan-note/siyuan/kernel/av"
+	"github.com/siyuan-note/siyuan/kernel/filesys"
 	"github.com/siyuan-note/siyuan/kernel/sql"
 	"github.com/siyuan-note/siyuan/kernel/treenode"
 	"github.com/siyuan-note/siyuan/kernel/util"
@@ -55,7 +56,7 @@ func GetDocInfo(blockID string) (ret *BlockInfo) {
 	WaitForWritingFiles()
 
 	tree, err := LoadTreeByBlockID(blockID)
-	if nil != err {
+	if err != nil {
 		logging.LogErrorf("load tree by root id [%s] failed: %s", blockID, err)
 		return
 	}
@@ -111,7 +112,7 @@ func GetDocInfo(blockID string) (ret *BlockInfo) {
 	var subFileCount int
 	boxLocalPath := filepath.Join(util.DataDir, tree.Box)
 	subFiles, err := os.ReadDir(filepath.Join(boxLocalPath, strings.TrimSuffix(tree.Path, ".sy")))
-	if nil == err {
+	if err == nil {
 		for _, subFile := range subFiles {
 			if strings.HasSuffix(subFile.Name(), ".sy") {
 				subFileCount++
@@ -123,6 +124,85 @@ func GetDocInfo(blockID string) (ret *BlockInfo) {
 	return
 }
 
+func GetDocsInfo(blockIDs []string, queryRefCount bool, queryAv bool) (rets []*BlockInfo) {
+	WaitForWritingFiles()
+
+	trees := filesys.LoadTrees(blockIDs)
+	for _, blockID := range blockIDs {
+		tree := trees[blockID]
+		if nil == tree {
+			continue
+		}
+		title := tree.Root.IALAttr("title")
+		ret := &BlockInfo{ID: blockID, RootID: tree.Root.ID, Name: title}
+		ret.IAL = parse.IAL2Map(tree.Root.KramdownIAL)
+		scrollData := ret.IAL["scroll"]
+		if 0 < len(scrollData) {
+			scroll := map[string]interface{}{}
+			if parseErr := gulu.JSON.UnmarshalJSON([]byte(scrollData), &scroll); nil != parseErr {
+				logging.LogWarnf("parse scroll data [%s] failed: %s", scrollData, parseErr)
+				delete(ret.IAL, "scroll")
+			} else {
+				if zoomInId := scroll["zoomInId"]; nil != zoomInId {
+					if !treenode.ExistBlockTree(zoomInId.(string)) {
+						delete(ret.IAL, "scroll")
+					}
+				} else {
+					if startId := scroll["startId"]; nil != startId {
+						if !treenode.ExistBlockTree(startId.(string)) {
+							delete(ret.IAL, "scroll")
+						}
+					}
+					if endId := scroll["endId"]; nil != endId {
+						if !treenode.ExistBlockTree(endId.(string)) {
+							delete(ret.IAL, "scroll")
+						}
+					}
+				}
+			}
+		}
+		if queryRefCount {
+			ret.RefIDs, _ = sql.QueryRefIDsByDefID(blockID, false)
+			ret.RefCount = len(ret.RefIDs) // 填充块引计数
+		}
+
+		if queryAv {
+			// 填充属性视图角标 Display the database title on the block superscript https://github.com/siyuan-note/siyuan/issues/10545
+			avIDs := strings.Split(ret.IAL[av.NodeAttrNameAvs], ",")
+			for _, avID := range avIDs {
+				avName, getErr := av.GetAttributeViewName(avID)
+				if nil != getErr {
+					continue
+				}
+
+				if "" == avName {
+					avName = Conf.language(105)
+				}
+
+				attrView := &AttrView{ID: avID, Name: avName}
+				ret.AttrViews = append(ret.AttrViews, attrView)
+			}
+		}
+
+		var subFileCount int
+		boxLocalPath := filepath.Join(util.DataDir, tree.Box)
+		subFiles, err := os.ReadDir(filepath.Join(boxLocalPath, strings.TrimSuffix(tree.Path, ".sy")))
+		if err == nil {
+			for _, subFile := range subFiles {
+				if strings.HasSuffix(subFile.Name(), ".sy") {
+					subFileCount++
+				}
+			}
+		}
+		ret.SubFileCount = subFileCount
+		ret.Icon = tree.Root.IALAttr("icon")
+
+		rets = append(rets, ret)
+
+	}
+	return
+}
+
 func GetBlockRefText(id string) string {
 	bt := treenode.GetBlockTree(id)
 	if nil == bt {
@@ -130,7 +210,7 @@ func GetBlockRefText(id string) string {
 	}
 
 	tree, err := LoadTreeByBlockID(id)
-	if nil != err {
+	if err != nil {
 		return ""
 	}
 
@@ -215,21 +295,21 @@ func getNodeRefText0(node *ast.Node) string {
 	return ret
 }
 
-func GetBlockRefIDs(id string) (refIDs, refTexts, defIDs []string) {
+func GetBlockRefs(defID string) (refIDs, refTexts, defIDs []string) {
 	refIDs = []string{}
 	refTexts = []string{}
 	defIDs = []string{}
-	bt := treenode.GetBlockTree(id)
+	bt := treenode.GetBlockTree(defID)
 	if nil == bt {
 		return
 	}
 
 	isDoc := bt.ID == bt.RootID
-	refIDs, refTexts = sql.QueryRefIDsByDefID(id, isDoc)
+	refIDs, refTexts = sql.QueryRefIDsByDefID(defID, isDoc)
 	if isDoc {
-		defIDs = sql.QueryChildDefIDsByRootDefID(id)
+		defIDs = sql.QueryChildDefIDsByRootDefID(defID)
 	} else {
-		defIDs = append(defIDs, id)
+		defIDs = append(defIDs, defID)
 	}
 	return
 }
@@ -336,11 +416,11 @@ func BuildBlockBreadcrumb(id string, excludeTypes []string) (ret []*BlockPath, e
 		return
 	}
 
-	ret = buildBlockBreadcrumb(node, excludeTypes)
+	ret = buildBlockBreadcrumb(node, excludeTypes, true)
 	return
 }
 
-func buildBlockBreadcrumb(node *ast.Node, excludeTypes []string) (ret []*BlockPath) {
+func buildBlockBreadcrumb(node *ast.Node, excludeTypes []string, displayCurrentNodeContent bool) (ret []*BlockPath) {
 	ret = []*BlockPath{}
 	if nil == node {
 		return
@@ -400,6 +480,12 @@ func buildBlockBreadcrumb(node *ast.Node, excludeTypes []string) (ret []*BlockPa
 
 		name = strings.ReplaceAll(name, editor.Caret, "")
 		name = util.EscapeHTML(name)
+
+		if parent == node && !displayCurrentNodeContent {
+			// 反链中不显示当前块内容 https://github.com/siyuan-note/siyuan/issues/12862#issuecomment-2426406327
+			name = ""
+		}
+
 		if add {
 			ret = append([]*BlockPath{{
 				ID:      id,

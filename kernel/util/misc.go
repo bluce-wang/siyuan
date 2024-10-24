@@ -96,6 +96,8 @@ func EscapeHTML(s string) (ret string) {
 	ret = strings.ReplaceAll(ret, "__@gt__", "&gt;")
 	ret = strings.ReplaceAll(ret, "__@34__", "&#34;")
 	ret = strings.ReplaceAll(ret, "__@13__", "&#13;")
+	ret = strings.ReplaceAll(ret, "&lt;", "&amp;lt;")
+	ret = strings.ReplaceAll(ret, "&gt;", "&amp;gt;")
 	return
 }
 
@@ -146,7 +148,7 @@ func Convert2Float(s string) (float64, bool) {
 	}
 	s = buf.String()
 	ret, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if nil != err {
+	if err != nil {
 		return 0, false
 	}
 	return ret, true

@@ -29,8 +29,8 @@ import (
 	"github.com/88250/lute/ast"
 	"github.com/88250/lute/parse"
 	"github.com/emirpasic/gods/sets/hashset"
-	"github.com/facette/natsort"
 	"github.com/siyuan-note/logging"
+	"github.com/siyuan-note/siyuan/kernel/filesys"
 	"github.com/siyuan-note/siyuan/kernel/search"
 	"github.com/siyuan-note/siyuan/kernel/sql"
 	"github.com/siyuan-note/siyuan/kernel/treenode"
@@ -44,20 +44,12 @@ func RefreshBacklink(id string) {
 
 func refreshRefsByDefID(defID string) {
 	refs := sql.QueryRefsByDefID(defID, false)
-	trees := map[string]*parse.Tree{}
+	var rootIDs []string
 	for _, ref := range refs {
-		tree := trees[ref.RootID]
-		if nil != tree {
-			continue
-		}
-
-		var loadErr error
-		tree, loadErr = LoadTreeByBlockID(ref.RootID)
-		if nil != loadErr {
-			logging.LogErrorf("refresh tree refs failed: %s", loadErr)
-			continue
-		}
-		trees[ref.RootID] = tree
+		rootIDs = append(rootIDs, ref.RootID)
+	}
+	trees := filesys.LoadTrees(rootIDs)
+	for _, tree := range trees {
 		sql.UpdateRefsTreeQueue(tree)
 	}
 }
@@ -68,7 +60,7 @@ type Backlink struct {
 	Expand     bool         `json:"expand"`
 }
 
-func GetBackmentionDoc(defID, refTreeID, keyword string) (ret []*Backlink) {
+func GetBackmentionDoc(defID, refTreeID, keyword string, containChildren bool) (ret []*Backlink) {
 	keyword = strings.TrimSpace(keyword)
 	ret = []*Backlink{}
 	beforeLen := 12
@@ -78,43 +70,40 @@ func GetBackmentionDoc(defID, refTreeID, keyword string) (ret []*Backlink) {
 	}
 	rootID := sqlBlock.RootID
 
-	refs := sql.QueryRefsByDefID(defID, true)
-	refs = removeDuplicatedRefs(refs) // 同一个块中引用多个相同块时反链去重 https://github.com/siyuan-note/siyuan/issues/3317
+	refs := sql.QueryRefsByDefID(defID, containChildren)
+	refs = removeDuplicatedRefs(refs)
 
 	linkRefs, _, excludeBacklinkIDs := buildLinkRefs(rootID, refs, keyword)
 	tmpMentions, mentionKeywords := buildTreeBackmention(sqlBlock, linkRefs, keyword, excludeBacklinkIDs, beforeLen)
-	luteEngine := NewLute()
-	treeCache := map[string]*parse.Tree{}
+	luteEngine := util.NewLute()
 	var mentions []*Block
 	for _, mention := range tmpMentions {
 		if mention.RootID == refTreeID {
 			mentions = append(mentions, mention)
 		}
 	}
+	var mentionBlockIDs []string
+	for _, mention := range mentions {
+		mentionBlockIDs = append(mentionBlockIDs, mention.ID)
+	}
+	mentionBlockIDs = gulu.Str.RemoveDuplicatedElem(mentionBlockIDs)
 
 	if "" != keyword {
 		mentionKeywords = append(mentionKeywords, keyword)
 	}
 	mentionKeywords = gulu.Str.RemoveDuplicatedElem(mentionKeywords)
-	for _, mention := range mentions {
-		refTree := treeCache[mention.RootID]
-		if nil == refTree {
-			var loadErr error
-			refTree, loadErr = LoadTreeByBlockID(mention.ID)
-			if nil != loadErr {
-				logging.LogWarnf("load ref tree [%s] failed: %s", mention.ID, loadErr)
-				continue
-			}
-			treeCache[mention.RootID] = refTree
-		}
 
-		backlink := buildBacklink(mention.ID, refTree, mentionKeywords, luteEngine)
-		ret = append(ret, backlink)
+	trees := filesys.LoadTrees(mentionBlockIDs)
+	for id, tree := range trees {
+		backlink := buildBacklink(id, tree, mentionKeywords, luteEngine)
+		if nil != backlink {
+			ret = append(ret, backlink)
+		}
 	}
 	return
 }
 
-func GetBacklinkDoc(defID, refTreeID, keyword string) (ret []*Backlink) {
+func GetBacklinkDoc(defID, refTreeID, keyword string, containChildren bool) (ret []*Backlink) {
 	keyword = strings.TrimSpace(keyword)
 	ret = []*Backlink{}
 	sqlBlock := sql.GetBlock(defID)
@@ -123,30 +112,32 @@ func GetBacklinkDoc(defID, refTreeID, keyword string) (ret []*Backlink) {
 	}
 	rootID := sqlBlock.RootID
 
-	tmpRefs := sql.QueryRefsByDefID(defID, true)
+	tmpRefs := sql.QueryRefsByDefID(defID, containChildren)
 	var refs []*sql.Ref
 	for _, ref := range tmpRefs {
 		if ref.RootID == refTreeID {
 			refs = append(refs, ref)
 		}
 	}
-	refs = removeDuplicatedRefs(refs) // 同一个块中引用多个相同块时反链去重 https://github.com/siyuan-note/siyuan/issues/3317
+	refs = removeDuplicatedRefs(refs)
 
 	linkRefs, _, _ := buildLinkRefs(rootID, refs, keyword)
 	refTree, err := LoadTreeByBlockID(refTreeID)
-	if nil != err {
+	if err != nil {
 		logging.LogWarnf("load ref tree [%s] failed: %s", refTreeID, err)
 		return
 	}
 
-	luteEngine := NewLute()
+	luteEngine := util.NewLute()
 	for _, linkRef := range linkRefs {
 		var keywords []string
 		if "" != keyword {
 			keywords = append(keywords, keyword)
 		}
 		backlink := buildBacklink(linkRef.ID, refTree, keywords, luteEngine)
-		ret = append(ret, backlink)
+		if nil != backlink {
+			ret = append(ret, backlink)
+		}
 	}
 	return
 }
@@ -183,11 +174,13 @@ func buildBacklink(refID string, refTree *parse.Tree, keywords []string, luteEng
 	}
 
 	dom := renderBlockDOMByNodes(renderNodes, luteEngine)
-	ret = &Backlink{
-		DOM:        dom,
-		BlockPaths: buildBlockBreadcrumb(n, nil),
-		Expand:     expand,
+	blockPaths := []*BlockPath{}
+	if nil != n.Parent && ast.NodeDocument != n.Parent.Type && nil != n.Parent.Parent && ast.NodeDocument != n.Parent.Parent.Type {
+		// 仅在多余一层时才显示面包屑，这样界面展示更加简洁
+		// The backlink panel no longer displays breadcrumbs of the first-level blocks https://github.com/siyuan-note/siyuan/issues/12862
+		blockPaths = buildBlockBreadcrumb(n, nil, false)
 	}
+	ret = &Backlink{DOM: dom, BlockPaths: blockPaths, Expand: expand}
 	return
 }
 
@@ -241,7 +234,7 @@ func getBacklinkRenderNodes(n *ast.Node) (ret []*ast.Node, expand bool) {
 	return
 }
 
-func GetBacklink2(id, keyword, mentionKeyword string, sortMode, mentionSortMode int) (boxID string, backlinks, backmentions []*Path, linkRefsCount, mentionsCount int) {
+func GetBacklink2(id, keyword, mentionKeyword string, sortMode, mentionSortMode int, containChildren bool) (boxID string, backlinks, backmentions []*Path, linkRefsCount, mentionsCount int) {
 	keyword = strings.TrimSpace(keyword)
 	mentionKeyword = strings.TrimSpace(mentionKeyword)
 	backlinks, backmentions = []*Path{}, []*Path{}
@@ -253,12 +246,11 @@ func GetBacklink2(id, keyword, mentionKeyword string, sortMode, mentionSortMode 
 	rootID := sqlBlock.RootID
 	boxID = sqlBlock.Box
 
-	refs := sql.QueryRefsByDefID(id, true)
-	refs = removeDuplicatedRefs(refs) // 同一个块中引用多个相同块时反链去重 https://github.com/siyuan-note/siyuan/issues/3317
+	refs := sql.QueryRefsByDefID(id, containChildren)
+	refs = removeDuplicatedRefs(refs)
 
 	linkRefs, linkRefsCount, excludeBacklinkIDs := buildLinkRefs(rootID, refs, keyword)
 	tmpBacklinks := toFlatTree(linkRefs, 0, "backlink", nil)
-
 	for _, l := range tmpBacklinks {
 		l.Blocks = nil
 		backlinks = append(backlinks, l)
@@ -275,13 +267,13 @@ func GetBacklink2(id, keyword, mentionKeyword string, sortMode, mentionSortMode 
 		case util.SortModeCreatedASC:
 			return backlinks[i].Created < backlinks[j].Created
 		case util.SortModeNameDESC:
-			return util.PinYinCompare(util.RemoveEmojiInvisible(backlinks[j].Name), util.RemoveEmojiInvisible(backlinks[i].Name))
+			return util.PinYinCompare(backlinks[j].Name, backlinks[i].Name)
 		case util.SortModeNameASC:
-			return util.PinYinCompare(util.RemoveEmojiInvisible(backlinks[i].Name), util.RemoveEmojiInvisible(backlinks[j].Name))
+			return util.PinYinCompare(backlinks[i].Name, backlinks[j].Name)
 		case util.SortModeAlphanumDESC:
-			return natsort.Compare(util.RemoveEmojiInvisible(backlinks[j].Name), util.RemoveEmojiInvisible(backlinks[i].Name))
+			return util.NaturalCompare(backlinks[j].Name, backlinks[i].Name)
 		case util.SortModeAlphanumASC:
-			return natsort.Compare(util.RemoveEmojiInvisible(backlinks[i].Name), util.RemoveEmojiInvisible(backlinks[j].Name))
+			return util.NaturalCompare(backlinks[i].Name, backlinks[j].Name)
 		}
 		return backlinks[i].ID > backlinks[j].ID
 	})
@@ -304,13 +296,13 @@ func GetBacklink2(id, keyword, mentionKeyword string, sortMode, mentionSortMode 
 		case util.SortModeCreatedASC:
 			return backmentions[i].Created < backmentions[j].Created
 		case util.SortModeNameDESC:
-			return util.PinYinCompare(util.RemoveEmojiInvisible(backmentions[j].Name), util.RemoveEmojiInvisible(backmentions[i].Name))
+			return util.PinYinCompare(backmentions[j].Name, backmentions[i].Name)
 		case util.SortModeNameASC:
-			return util.PinYinCompare(util.RemoveEmojiInvisible(backmentions[i].Name), util.RemoveEmojiInvisible(backmentions[j].Name))
+			return util.PinYinCompare(backmentions[i].Name, backmentions[j].Name)
 		case util.SortModeAlphanumDESC:
-			return natsort.Compare(util.RemoveEmojiInvisible(backmentions[j].Name), util.RemoveEmojiInvisible(backmentions[i].Name))
+			return util.NaturalCompare(backmentions[j].Name, backmentions[i].Name)
 		case util.SortModeAlphanumASC:
-			return natsort.Compare(util.RemoveEmojiInvisible(backmentions[i].Name), util.RemoveEmojiInvisible(backmentions[j].Name))
+			return util.NaturalCompare(backmentions[i].Name, backmentions[j].Name)
 		}
 		return backmentions[i].ID > backmentions[j].ID
 	})
@@ -340,7 +332,7 @@ func GetBacklink2(id, keyword, mentionKeyword string, sortMode, mentionSortMode 
 	return
 }
 
-func GetBacklink(id, keyword, mentionKeyword string, beforeLen int) (boxID string, linkPaths, mentionPaths []*Path, linkRefsCount, mentionsCount int) {
+func GetBacklink(id, keyword, mentionKeyword string, beforeLen int, containChildren bool) (boxID string, linkPaths, mentionPaths []*Path, linkRefsCount, mentionsCount int) {
 	linkPaths = []*Path{}
 	mentionPaths = []*Path{}
 
@@ -352,8 +344,8 @@ func GetBacklink(id, keyword, mentionKeyword string, beforeLen int) (boxID strin
 	boxID = sqlBlock.Box
 
 	var links []*Block
-	refs := sql.QueryRefsByDefID(id, true)
-	refs = removeDuplicatedRefs(refs) // 同一个块中引用多个相同块时反链去重 https://github.com/siyuan-note/siyuan/issues/3317
+	refs := sql.QueryRefsByDefID(id, containChildren)
+	refs = removeDuplicatedRefs(refs)
 
 	// 为了减少查询，组装好 IDs 后一次查出
 	defSQLBlockIDs, refSQLBlockIDs := map[string]bool{}, map[string]bool{}
@@ -520,7 +512,7 @@ func buildLinkRefs(defRootID string, refs []*sql.Ref, keyword string) (ret []*Bl
 	}
 
 	var paragraphParentIDs []string
-	for parentID, _ := range parentRefParagraphs {
+	for parentID := range parentRefParagraphs {
 		paragraphParentIDs = append(paragraphParentIDs, parentID)
 	}
 	sqlParagraphParents := sql.GetBlocks(paragraphParentIDs)
@@ -564,10 +556,13 @@ func buildLinkRefs(defRootID string, refs []*sql.Ref, keyword string) (ret []*Bl
 }
 
 func removeDuplicatedRefs(refs []*sql.Ref) (ret []*sql.Ref) {
+	// 同一个块中引用多个块后反链去重
+	// De-duplication of backlinks after referencing multiple blocks in the same block https://github.com/siyuan-note/siyuan/issues/12147
+
 	for _, ref := range refs {
 		contain := false
 		for _, r := range ret {
-			if ref.DefBlockID == r.DefBlockID && ref.BlockID == r.BlockID {
+			if ref.BlockID == r.BlockID {
 				contain = true
 				break
 			}

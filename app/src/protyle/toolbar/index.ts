@@ -83,20 +83,19 @@ export class Toolbar {
             return;
         }
         // https://github.com/siyuan-note/siyuan/issues/5157
-        let hasImg = true;
-        let noText = true;
+        let hasText = false;
         Array.from(range.cloneContents().childNodes).find(item => {
-            if (item.nodeType !== 1) {
-                if (item.textContent.length > 0) {
-                    noText = false;
+            // zwsp 不显示工具栏
+            if (item.textContent.length > 0 && item.textContent !== Constants.ZWSP) {
+                if (item.nodeType === 1 && (item as HTMLElement).classList.contains("img")) {
+                    // 图片不显示工具栏
+                } else {
+                    hasText = true;
                     return true;
                 }
-            } else if (!(item as HTMLElement).classList.contains("img")) {
-                hasImg = false;
-                return true;
             }
         });
-        if ((hasImg && noText) ||
+        if (!hasText ||
             // 拖拽图片到最右侧
             (range.commonAncestorContainer.nodeType !== 3 && (range.commonAncestorContainer as HTMLElement).classList.contains("img"))) {
             this.element.classList.add("fn__none");
@@ -370,7 +369,11 @@ export class Toolbar {
                 }
             }
             contents.childNodes.forEach((item: HTMLElement, index) => {
-                if (item.nodeType !== 3 && item.tagName !== "BR" && item.tagName !== "IMG") {
+                if (item.nodeType !== 3 && item.tagName !== "BR" && item.tagName !== "IMG" && !item.classList.contains("img")) {
+                    // 图片后有粗体，仅选中图片后，rang 中会包含一个空的粗体，需移除
+                    if (item.textContent === "") {
+                        return;
+                    }
                     const types = (item.getAttribute("data-type") || "").split(" ");
                     if (type === "clear") {
                         for (let i = 0; i < types.length; i++) {
@@ -484,12 +487,14 @@ export class Toolbar {
                             hasSameTextStyle(item, nextElement, textObj)) {
                             nextIndex = item.textContent.length;
                             nextElement.innerHTML = item.textContent + nextElement.innerHTML;
-                        } else {
+                        } else  if (item.textContent !== Constants.ZWSP) {
                             const inlineElement = document.createElement("span");
                             inlineElement.setAttribute("data-type", type);
                             inlineElement.textContent = item.textContent;
                             setFontStyle(inlineElement, textObj);
                             newNodes.push(inlineElement);
+                        } else {
+                            newNodes.push(item);
                         }
                     } else {
                         let types = (item.getAttribute("data-type") || "").split(" ");
@@ -500,7 +505,9 @@ export class Toolbar {
                                 i--;
                             }
                         }
-                        types.push(type);
+                        if (!types.includes("img")) {
+                            types.push(type);
+                        }
                         // 上标和下标不能同时存在 https://github.com/siyuan-note/insider/issues/1049
                         if (type === "sub" && types.includes("sup")) {
                             types.find((item, index) => {
@@ -600,9 +607,12 @@ export class Toolbar {
         for (let i = 0; i < newNodes.length; i++) {
             const currentNewNode = newNodes[i] as HTMLElement;
             const nextNewNode = newNodes[i + 1] as HTMLElement;
+            const currentType = currentNewNode.nodeType !== 3 ? (currentNewNode.getAttribute("data-type") || "") : "";
             if (currentNewNode.nodeType !== 3 && nextNewNode && nextNewNode.nodeType !== 3 &&
                 nextNewNode.tagName === currentNewNode.tagName &&
-                isArrayEqual((nextNewNode.getAttribute("data-type") || "").split(" "), (currentNewNode.getAttribute("data-type") || "").split(" ")) &&
+                // 表格内多个换行 https://github.com/siyuan-note/siyuan/issues/12300
+                currentNewNode.tagName !== "BR" &&
+                isArrayEqual((nextNewNode.getAttribute("data-type") || "").split(" "), currentType.split(" ")) &&
                 currentNewNode.getAttribute("data-id") === nextNewNode.getAttribute("data-id") &&
                 currentNewNode.getAttribute("data-subtype") === nextNewNode.getAttribute("data-subtype") &&
                 currentNewNode.style.color === nextNewNode.style.color &&
@@ -612,7 +622,6 @@ export class Toolbar {
                 currentNewNode.style.fontSize === nextNewNode.style.fontSize &&
                 currentNewNode.style.backgroundColor === nextNewNode.style.backgroundColor) {
                 // 合并相同的 node
-                const currentType = currentNewNode.getAttribute("data-type");
                 if (currentType.indexOf("inline-math") > -1) {
                     // 数学公式合并 data-content https://github.com/siyuan-note/siyuan/issues/6028
                     nextNewNode.setAttribute("data-content", currentNewNode.getAttribute("data-content") + nextNewNode.getAttribute("data-content"));
@@ -1185,8 +1194,10 @@ export class Toolbar {
 
     private updateLanguage(languageElement: HTMLElement, protyle: IProtyle, id: string, nodeElement: HTMLElement, oldHtml: string, selectedLang: string) {
         languageElement.textContent = selectedLang === window.siyuan.languages.clear ? "" : selectedLang;
-        window.siyuan.storage[Constants.LOCAL_CODELANG] = languageElement.textContent;
-        setStorageVal(Constants.LOCAL_CODELANG, window.siyuan.storage[Constants.LOCAL_CODELANG]);
+        if (!Constants.SIYUAN_RENDER_CODE_LANGUAGES.includes(languageElement.textContent)) {
+            window.siyuan.storage[Constants.LOCAL_CODELANG] = languageElement.textContent;
+            setStorageVal(Constants.LOCAL_CODELANG, window.siyuan.storage[Constants.LOCAL_CODELANG]);
+        }
         const editElement = getContenteditableElement(nodeElement);
         if (Constants.SIYUAN_RENDER_CODE_LANGUAGES.includes(languageElement.textContent)) {
             nodeElement.dataset.content = editElement.textContent.trim();
@@ -1195,14 +1206,8 @@ export class Toolbar {
             nodeElement.innerHTML = `<div spin="1"></div><div class="protyle-attr" contenteditable="false">${Constants.ZWSP}</div>`;
             processRender(nodeElement);
         } else {
-            const lineNumber = nodeElement.getAttribute("linenumber");
-            if (lineNumber === "true" || (lineNumber !== "false" && window.siyuan.config.editor.codeSyntaxHighlightLineNum)) {
-                editElement.classList.add("protyle-linenumber");
-            } else {
-                editElement.classList.remove("protyle-linenumber");
-            }
             (editElement as HTMLElement).textContent = editElement.textContent;
-            editElement.removeAttribute("data-render");
+            editElement.parentElement.removeAttribute("data-render");
             highlightRender(nodeElement);
         }
         nodeElement.setAttribute("updated", dayjs().format("YYYYMMDDHHmmss"));

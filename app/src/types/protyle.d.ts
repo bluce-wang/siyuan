@@ -206,6 +206,8 @@ declare class Lute {
 
     public SetInlineMath(enable: boolean): void;
 
+    public SetGFMStrikethrough(enable: boolean): void;
+
     public SetGFMStrikethrough1(enable: boolean): void;
 
     public SetMark(enable: boolean): void;
@@ -213,6 +215,10 @@ declare class Lute {
     public SetSub(enable: boolean): void;
 
     public SetSup(enable: boolean): void;
+
+    public SetInlineAsterisk(enable: boolean): void;
+
+    public SetInlineUnderscore(enable: boolean): void;
 
     public SetBlockRef(enable: boolean): void;
 
@@ -366,6 +372,7 @@ interface IPreviewActionCustom {
 }
 
 interface IHintData {
+    id?: string;
     html: string;
     value: string;
     filter?: string[]
